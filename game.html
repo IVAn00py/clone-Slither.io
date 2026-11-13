@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Slither — Game Client</title>
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#0a0a12; }
+  canvas { display:block; }
+  #ui {
+    position:fixed; top:10px; left:10px; color:#ddd; font-family:monospace;
+    background:rgba(0,0,0,.5); padding:8px 10px; border-radius:6px; font-size:13px;
+    pointer-events:none;
+  }
+  #login {
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:#0a0a12; color:#ddd; font-family:monospace; flex-direction:column; gap:10px;
+  }
+  #login input, #login button { padding:8px 10px; font-size:14px; }
+  #hint { position:fixed; bottom:10px; left:10px; color:#888; font-family:monospace; font-size:12px; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h2>Slither — подключение</h2>
+  <input id="url" value="ws://tcp.cloudpub.ru:17539" size="30">
+  <input id="name" placeholder="Ваше имя" size="20">
+  <button onclick="startGame()">Играть</button>
+  <div id="err" style="color:#f66"></div>
+</div>
+
+<canvas id="cv"></canvas>
+<div id="ui"></div>
+<div id="hint">← → или A/D — поворот · Shift — буст</div>
+
+<script>
+// ================== Состояние клиента ==================
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const ui = document.getElementById("ui");
+
+let ws = null;
+let myId = null;
+let world = { cx:0, cy:0, r:1200 };
+
+// Сырые снапшоты от сервера: id -> {x,y,a,b,n}
+let serverState = new Map();
+// Для интерполяции: предыдущий и текущий снапшот + время
+let prevSnapshot = new Map();
+let curSnapshot  = new Map();
+let snapshotTime = performance.now();
+const INTERP_MS = 1000 / 20; // 20 Гц
+
+// Управление
+let turn = 0;      // -1 / 0 / +1
+let boost = false;
+
+// Камера
+let camX = 0, camY = 0;
+let camZoom = 1.0;
+
+// ================== Подключение ==================
+function startGame() {
+  const url = document.getElementById("url").value.trim();
+  const name = document.getElementById("name").value.trim();
+  const err = document.getElementById("err");
+  err.textContent = "";
+  if (!name) { err.textContent = "Введите имя"; return; }
+
+  ws = new WebSocket(url);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type:"join", name }));
+    document.getElementById("login").style.display = "none";
+    resize();
+  };
+  ws.onmessage = (ev) => {
+    const data = JSON.parse(ev.data);
+    if (data.type === "welcome") {
+      myId = data.id;
+      world = data.world;
+    } else if (data.type === "state") {
+      // сдвигаем снапшоты
+      prevSnapshot = curSnapshot;
+      curSnapshot = new Map();
+      for (const p of data.p) curSnapshot.set(p.i, p);
+      snapshotTime = performance.now();
+    } else if (data.type === "error") {
+      err.textContent = data.message;
+    }
+  };
+  ws.onerror = () => { err.textContent = "Не удалось подключиться"; };
+  ws.onclose = () => { err.textContent = "Соединение закрыто"; };
+}
+
+// ================== Ввод ==================
+function sendInput() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type:"input", turn, boost }));
+  }
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.repeat) return;
+  if (e.code === "ArrowLeft"  || e.code === "KeyA") { turn = -1; sendInput(); }
+  if (e.code === "ArrowRight" || e.code === "KeyD") { turn =  1; sendInput(); }
+  if (e.code === "ShiftLeft"  || e.code === "ShiftRight") { boost = true; sendInput(); }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code === "ArrowLeft"  || e.code === "KeyA") { if (turn === -1) { turn = 0; sendInput(); } }
+  if (e.code === "ArrowRight" || e.code === "KeyD") { if (turn ===  1) { turn = 0; sendInput(); } }
+  if (e.code === "ShiftLeft"  || e.code === "ShiftRight") { boost = false; sendInput(); }
+});
+
+// ================== Интерполяция ==================
+function lerp(a, b, t) { return a + (b - a) * t; }
+function lerpAngle(a, b, t) {
+  let d = b - a;
+  while (d >  Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return a + d * t;
+}
+
+function getInterpolated(id) {
+  const cur = curSnapshot.get(id);
+  if (!cur) return null;
+  const prev = prevSnapshot.get(id) || cur;
+  let t = (performance.now() - snapshotTime) / INTERP_MS;
+  if (t > 1) t = 1;
+  return {
+    id,
+    x: lerp(prev.x, cur.x, t),
+    y: lerp(prev.y, cur.y, t),
+    a: lerpAngle(prev.a, cur.a, t),
+    n: cur.n,
+    b: cur.b,
+  };
+}
+
+// ================== Рендер ==================
+function resize() {
+  cv.width = window.innerWidth;
+  cv.height = window.innerHeight;
+}
+window.addEventListener("resize", resize);
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  ctx.fillStyle = "#0a0a12";
+  ctx.fillRect(0, 0, W, H);
+
+  // Мой червь для камеры
+  const me = myId != null ? getInterpolated(myId) : null;
+  if (me) {
+    // плавно ведём камеру
+    camX = lerp(camX, me.x, 0.15);
+    camY = lerp(camY, me.y, 0.15);
+  }
+
+  ctx.save();
+  ctx.translate(W/2, H/2);
+  ctx.scale(camZoom, camZoom);
+  ctx.translate(-camX, -camY);
+
+  // Круглая арена
+  ctx.beginPath();
+  ctx.arc(world.cx, world.cy, world.r, 0, Math.PI * 2);
+  ctx.strokeStyle = "#2a2a4a";
+  ctx.lineWidth = 6;
+  ctx.stroke();
+  ctx.fillStyle = "rgba(20,20,40,0.35)";
+  ctx.fill();
+
+  // Игроки
+  for (const id of curSnapshot.keys()) {
+    const p = getInterpolated(id);
+    if (!p) continue;
+    const isMe = (id === myId);
+
+    // тело (просто круг для проверки; позже — сегменты)
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, isMe ? 18 : 16, 0, Math.PI * 2);
+    ctx.fillStyle = isMe ? "#4af" : "#f74";
+    if (p.b) ctx.fillStyle = isMe ? "#8cf" : "#fa6";
+    ctx.fill();
+    ctx.strokeStyle = isMe ? "#cff" : "#fcc";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // направление (нос)
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(p.x + Math.cos(p.a) * 26, p.y + Math.sin(p.a) * 26);
+    ctx.strokeStyle = isMe ? "#cff" : "#fcc";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // ник
+    ctx.fillStyle = "#eee";
+    ctx.font = "14px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(p.n, p.x, p.y - 26);
+  }
+
+  ctx.restore();
+
+  // HUD
+  ui.textContent = me
+    ? `id=${myId}  x=${me.x.toFixed(1)}  y=${me.y.toFixed(1)}  a=${me.a.toFixed(2)}  boost=${me.b}`
+    : "ожидание состояния...";
+
+  requestAnimationFrame(draw);
+}
+
+resize();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
