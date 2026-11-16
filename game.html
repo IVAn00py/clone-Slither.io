@@ -1,218 +1,291 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="utf-8">
-<title>Slither — Game Client</title>
-<style>
-  html, body { margin:0; height:100%; overflow:hidden; background:#0a0a12; }
-  canvas { display:block; }
-  #ui {
-    position:fixed; top:10px; left:10px; color:#ddd; font-family:monospace;
-    background:rgba(0,0,0,.5); padding:8px 10px; border-radius:6px; font-size:13px;
-    pointer-events:none;
-  }
-  #login {
-    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
-    background:#0a0a12; color:#ddd; font-family:monospace; flex-direction:column; gap:10px;
-  }
-  #login input, #login button { padding:8px 10px; font-size:14px; }
-  #hint { position:fixed; bottom:10px; left:10px; color:#888; font-family:monospace; font-size:12px; }
-</style>
-</head>
-<body>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worm Arena</title>
 
-<div id="login">
-  <h2>Slither — подключение</h2>
-  <input id="url" value="ws://localhost:8765" size="30">
-  <input id="name" placeholder="Ваше имя" size="20">
-  <button onclick="startGame()">Играть</button>
-  <div id="err" style="color:#f66"></div>
-</div>
+  <style>
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
 
-<canvas id="cv"></canvas>
-<div id="ui"></div>
-<div id="hint">← → или A/D — поворот · Shift — буст</div>
-
-<script>
-// ================== Состояние клиента ==================
-const cv = document.getElementById("cv");
-const ctx = cv.getContext("2d");
-const ui = document.getElementById("ui");
-
-let ws = null;
-let myId = null;
-let world = { cx:0, cy:0, r:1200 };
-
-// Сырые снапшоты от сервера: id -> {x,y,a,b,n}
-let serverState = new Map();
-// Для интерполяции: предыдущий и текущий снапшот + время
-let prevSnapshot = new Map();
-let curSnapshot  = new Map();
-let snapshotTime = performance.now();
-const INTERP_MS = 1000 / 20; // 20 Гц
-
-// Управление
-let turn = 0;      // -1 / 0 / +1
-let boost = false;
-
-// Камера
-let camX = 0, camY = 0;
-let camZoom = 1.0;
-
-// ================== Подключение ==================
-function startGame() {
-  const url = document.getElementById("url").value.trim();
-  const name = document.getElementById("name").value.trim();
-  const err = document.getElementById("err");
-  err.textContent = "";
-  if (!name) { err.textContent = "Введите имя"; return; }
-
-  ws = new WebSocket(url);
-  ws.onopen = () => {
-    ws.send(JSON.stringify({ type:"join", name }));
-    document.getElementById("login").style.display = "none";
-    resize();
-  };
-  ws.onmessage = (ev) => {
-    const data = JSON.parse(ev.data);
-    if (data.type === "welcome") {
-      myId = data.id;
-      world = data.world;
-    } else if (data.type === "state") {
-      // сдвигаем снапшоты
-      prevSnapshot = curSnapshot;
-      curSnapshot = new Map();
-      for (const p of data.p) curSnapshot.set(p.i, p);
-      snapshotTime = performance.now();
-    } else if (data.type === "error") {
-      err.textContent = data.message;
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #0a0a12;
+      color: #ecf6ff;
+      font-family: system-ui, sans-serif;
     }
-  };
-  ws.onerror = () => { err.textContent = "Не удалось подключиться"; };
-  ws.onclose = () => { err.textContent = "Соединение закрыто"; };
-}
 
-// ================== Ввод ==================
-function sendInput() {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type:"input", turn, boost }));
-  }
-}
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100dvh;
+      touch-action: none;
+    }
 
-window.addEventListener("keydown", (e) => {
-  if (e.repeat) return;
-  if (e.code === "ArrowLeft"  || e.code === "KeyA") { turn = -1; sendInput(); }
-  if (e.code === "ArrowRight" || e.code === "KeyD") { turn =  1; sendInput(); }
-  if (e.code === "ShiftLeft"  || e.code === "ShiftRight") { boost = true; sendInput(); }
-});
-window.addEventListener("keyup", (e) => {
-  if (e.code === "ArrowLeft"  || e.code === "KeyA") { if (turn === -1) { turn = 0; sendInput(); } }
-  if (e.code === "ArrowRight" || e.code === "KeyD") { if (turn ===  1) { turn = 0; sendInput(); } }
-  if (e.code === "ShiftLeft"  || e.code === "ShiftRight") { boost = false; sendInput(); }
-});
+    #menu {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: radial-gradient(ellipse at 50% 30%, #183859e8, #050711f5 75%);
+    }
 
-// ================== Интерполяция ==================
-function lerp(a, b, t) { return a + (b - a) * t; }
-function lerpAngle(a, b, t) {
-  let d = b - a;
-  while (d >  Math.PI) d -= 2 * Math.PI;
-  while (d < -Math.PI) d += 2 * Math.PI;
-  return a + d * t;
-}
+    .card {
+      width: min(100%, 360px);
+      padding: 28px;
+      border: 1px solid #355273;
+      border-radius: 24px;
+      background: #0e1728;
+      text-align: center;
+    }
 
-function getInterpolated(id) {
-  const cur = curSnapshot.get(id);
-  if (!cur) return null;
-  const prev = prevSnapshot.get(id) || cur;
-  let t = (performance.now() - snapshotTime) / INTERP_MS;
-  if (t > 1) t = 1;
-  return {
-    id,
-    x: lerp(prev.x, cur.x, t),
-    y: lerp(prev.y, cur.y, t),
-    a: lerpAngle(prev.a, cur.a, t),
-    n: cur.n,
-    b: cur.b,
-  };
-}
+    h1 { margin: 0 0 24px; }
+    h1 span { color: #65ccff; }
 
-// ================== Рендер ==================
-function resize() {
-  cv.width = window.innerWidth;
-  cv.height = window.innerHeight;
-}
-window.addEventListener("resize", resize);
+    label {
+      display: block;
+      margin-bottom: 6px;
+      text-align: left;
+    }
 
-function draw() {
-  const W = cv.width, H = cv.height;
-  ctx.fillStyle = "#0a0a12";
-  ctx.fillRect(0, 0, W, H);
+    input, button {
+      min-height: 44px;
+      padding: 10px 14px;
+      border: 1px solid #355273;
+      border-radius: 10px;
+      background: #17263c;
+      color: inherit;
+      font: inherit;
+    }
 
-  // Мой червь для камеры
-  const me = myId != null ? getInterpolated(myId) : null;
-  if (me) {
-    // плавно ведём камеру
-    camX = lerp(camX, me.x, 0.15);
-    camY = lerp(camY, me.y, 0.15);
-  }
+    .card input, .card button { width: 100%; }
 
-  ctx.save();
-  ctx.translate(W/2, H/2);
-  ctx.scale(camZoom, camZoom);
-  ctx.translate(-camX, -camY);
+    button {
+      margin-top: 10px;
+      font-weight: 700;
+      cursor: pointer;
+    }
 
-  // Круглая арена
-  ctx.beginPath();
-  ctx.arc(world.cx, world.cy, world.r, 0, Math.PI * 2);
-  ctx.strokeStyle = "#2a2a4a";
-  ctx.lineWidth = 6;
-  ctx.stroke();
-  ctx.fillStyle = "rgba(20,20,40,0.35)";
-  ctx.fill();
+    #play {
+      background: #65ccff;
+      color: #081526;
+    }
 
-  // Игроки
-  for (const id of curSnapshot.keys()) {
-    const p = getInterpolated(id);
-    if (!p) continue;
-    const isMe = (id === myId);
+    #controls { color: #b8cce3; }
 
-    // тело (просто круг для проверки; позже — сегменты)
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, isMe ? 18 : 16, 0, Math.PI * 2);
-    ctx.fillStyle = isMe ? "#4af" : "#f74";
-    if (p.b) ctx.fillStyle = isMe ? "#8cf" : "#fa6";
-    ctx.fill();
-    ctx.strokeStyle = isMe ? "#cff" : "#fcc";
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    #menu-button {
+      position: fixed;
+      top: max(12px, env(safe-area-inset-top));
+      right: max(12px, env(safe-area-inset-right));
+      margin: 0;
+    }
+  </style>
+</head>
 
-    // направление (нос)
-    ctx.beginPath();
-    ctx.moveTo(p.x, p.y);
-    ctx.lineTo(p.x + Math.cos(p.a) * 26, p.y + Math.sin(p.a) * 26);
-    ctx.strokeStyle = isMe ? "#cff" : "#fcc";
-    ctx.lineWidth = 3;
-    ctx.stroke();
+<body>
+  <canvas id="arena" aria-label="Игровая арена"></canvas>
 
-    // ник
-    ctx.fillStyle = "#eee";
-    ctx.font = "14px monospace";
-    ctx.textAlign = "center";
-    ctx.fillText(p.n, p.x, p.y - 26);
-  }
+  <button id="menu-button" type="button" aria-label="Открыть меню" hidden>☰</button>
 
-  ctx.restore();
+  <div id="menu">
+    <form class="card" id="game-form">
+      <h1>WORM <span>ARENA</span></h1>
 
-  // HUD
-  ui.textContent = me
-    ? `id=${myId}  x=${me.x.toFixed(1)}  y=${me.y.toFixed(1)}  a=${me.a.toFixed(2)}  boost=${me.b}`
-    : "ожидание состояния...";
+      <label for="nickname">Ник игрока</label>
+      <input id="nickname" maxlength="20" value="Kyusora" autocomplete="off">
 
-  requestAnimationFrame(draw);
-}
+      <button id="play" type="submit">Играть</button>
+      <button id="help" type="button" aria-controls="controls" aria-expanded="false">
+        Управление
+      </button>
 
-resize();
-requestAnimationFrame(draw);
-</script>
+      <p id="controls" hidden>
+        Веди игрока курсором или пальцем. Удерживай пробел для ускорения.
+        Открой меню клавишей Esc или кнопкой ☰.
+      </p>
+    </form>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("arena");
+    const ctx = canvas.getContext("2d");
+    const menu = document.getElementById("menu");
+    const menuButton = document.getElementById("menu-button");
+    const form = document.getElementById("game-form");
+    const playButton = document.getElementById("play");
+    const nickname = document.getElementById("nickname");
+    const helpButton = document.getElementById("help");
+    const controls = document.getElementById("controls");
+
+    const world = { radius: 430 };
+    const player = { x: 0, y: 0, angle: 0, radius: 18, name: "Kyusora" };
+    const pointer = { x: 0, y: 0, active: false };
+
+    let started = false;
+    let boosting = false;
+    let previousTime = 0;
+
+    function resize() {
+      // Размер холста подстраивается под окно браузера.
+      canvas.width = canvas.clientWidth;
+      canvas.height = canvas.clientHeight;
+      pointer.active = false;
+    }
+
+    function startGame(event) {
+      event.preventDefault();
+
+      // Берём ник из поля меню. Пустой ник заменяем на «Игрок».
+      player.name = nickname.value.trim() || "Игрок";
+      started = true;
+      menu.hidden = true;
+      menuButton.hidden = false;
+      playButton.textContent = "Продолжить";
+      menuButton.focus();
+    }
+
+    function openMenu() {
+      menu.hidden = false;
+      menuButton.hidden = true;
+      boosting = false;
+      pointer.active = false;
+      playButton.focus();
+    }
+
+    function update(seconds) {
+      if (!menu.hidden || !pointer.active) return;
+
+      const dx = pointer.x - player.x;
+      const dy = pointer.y - player.y;
+      const distance = Math.hypot(dx, dy);
+f (distance < 2) return;
+
+      // atan2 вычисляет угол поворота к курсору или пальцу.
+      player.angle = Math.atan2(dy, dx);
+
+      const speed = boosting ? 360 : 210;
+      const step = Math.min(speed * seconds, distance);
+      player.x += Math.cos(player.angle) * step;
+      player.y += Math.sin(player.angle) * step;
+
+      // Удерживаем круг игрока внутри круглой арены.
+      const limit = world.radius - player.radius;
+      const fromCenter = Math.hypot(player.x, player.y);
+      if (fromCenter > limit) {
+        player.x *= limit / fromCenter;
+        player.y *= limit / fromCenter;
+      }
+    }
+
+    function arenaScale() {
+      return Math.min(canvas.width, canvas.height) / (world.radius * 2 + 56);
+    }
+
+    function draw(time) {
+      const seconds = previousTime ? Math.min((time - previousTime) / 1000, 0.05) : 0;
+      previousTime = time;
+      update(seconds);
+
+      ctx.fillStyle = "#0a0a12";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.save();
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      const scale = arenaScale();
+      ctx.scale(scale, scale);
+
+      // Арена.
+      ctx.beginPath();
+      ctx.arc(0, 0, world.radius, 0, Math.PI * 2);
+      ctx.fillStyle = "#141428";
+      ctx.fill();
+      ctx.strokeStyle = "#355273";
+      ctx.lineWidth = 6;
+      ctx.stroke();
+
+      // Тело игрока. При ускорении оно становится светлее.
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+      ctx.fillStyle = boosting ? "#8cf" : "#4af";
+      ctx.fill();
+      ctx.strokeStyle = "#cff";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Нос показывает направление. 26 — длина линии от центра тела.
+      const noseLength = 26;
+      ctx.beginPath();
+      ctx.moveTo(player.x, player.y);
+      ctx.lineTo(
+        player.x + Math.cos(player.angle) * noseLength,
+        player.y + Math.sin(player.angle) * noseLength
+      );
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      // Рисуем ник над игроком. Чем больше отступ, тем выше текст.
+      ctx.fillStyle = "#eee";
+      ctx.font = "20px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText(player.name, player.x, player.y - 30);
+
+      ctx.restore();
+      requestAnimationFrame(draw);
+    }
+
+    function aim(event) {
+      const bounds = canvas.getBoundingClientRect();
+      const scale = arenaScale();
+
+      pointer.x = (event.clientX - bounds.left - canvas.width / 2) / scale;
+      pointer.y = (event.clientY - bounds.top - canvas.height / 2) / scale;
+      pointer.active = true;
+    }
+
+    canvas.addEventListener("pointerdown", (event) => {
+      canvas.setPointerCapture(event.pointerId);
+      aim(event);
+    });
+    canvas.addEventListener("pointermove", aim);
+    canvas.addEventListener("pointercancel", () => {
+      pointer.active = false;
+    });
+
+    form.addEventListener("submit", startGame);
+    menuButton.addEventListener("click", openMenu);
+
+    helpButton.addEventListener("click", () => {
+      controls.hidden = !controls.hidden;
+      helpButton.setAttribute("aria-expanded", String(!controls.hidden));
+    });
+
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && started && !event.repeat) {
+        if (menu.hidden) openMenu();
+        else form.requestSubmit();
+      }
+
+      if (event.code === "Space" && menu.hidden && event.target !== menuButton) {
+        event.preventDefault();
+        boosting = true;
+      }
+    });
+
+    window.addEventListener("keyup", (event) => {
+      if (event.code === "Space") boosting = false;
+    });
+
+    window.addEventListener("blur", () => {
+      boosting = false;
+      pointer.active = false;
+    });
+
+    window.addEventListener("resize", resize);
+    resize();
+    requestAnimationFrame(draw);
+  </script>
 </body>
 </html>
