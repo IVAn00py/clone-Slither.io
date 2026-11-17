@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Worm Arena</title>
+  <title>Змейка-арена</title>
 
   <style>
     * { box-sizing: border-box; }
@@ -34,7 +34,7 @@
     }
 
     .card {
-      width: min(100%, 360px);
+      width: min(100%, 380px);
       padding: 28px;
       border: 1px solid #355273;
       border-radius: 24px;
@@ -47,7 +47,7 @@
 
     label {
       display: block;
-      margin-bottom: 6px;
+      margin: 14px 0 6px;
       text-align: left;
     }
 
@@ -64,7 +64,7 @@
     .card input, .card button { width: 100%; }
 
     button {
-      margin-top: 10px;
+      margin-top: 18px;
       font-weight: 700;
       cursor: pointer;
     }
@@ -73,8 +73,6 @@
       background: #65ccff;
       color: #081526;
     }
-
-    #controls { color: #b8cce3; }
 
     #menu-button {
       position: fixed;
@@ -92,20 +90,15 @@
 
   <div id="menu">
     <form class="card" id="game-form">
-      <h1>WORM <span>ARENA</span></h1>
+      <h1>ЗМЕЙКА <span>АРЕНА</span></h1>
 
       <label for="nickname">Ник игрока</label>
-      <input id="nickname" maxlength="20" value="Kyusora" autocomplete="off">
+      <input id="nickname" maxlength="20" value="" autocomplete="off">
+
+      <label for="server">Адрес сервера</label>
+      <input id="server" type="text" value="" placeholder="ws://localhost:8080" autocomplete="off" spellcheck="false">
 
       <button id="play" type="submit">Играть</button>
-      <button id="help" type="button" aria-controls="controls" aria-expanded="false">
-        Управление
-      </button>
-
-      <p id="controls" hidden>
-        Веди игрока курсором или пальцем. Удерживай пробел для ускорения.
-        Открой меню клавишей Esc или кнопкой ☰.
-      </p>
     </form>
   </div>
 
@@ -117,11 +110,10 @@
     const form = document.getElementById("game-form");
     const playButton = document.getElementById("play");
     const nickname = document.getElementById("nickname");
-    const helpButton = document.getElementById("help");
-    const controls = document.getElementById("controls");
+    const serverInput = document.getElementById("server");
 
     const world = { radius: 430 };
-    const player = { x: 0, y: 0, angle: 0, radius: 18, name: "Kyusora" };
+    const player = { x: 0, y: 0, angle: 0, radius: 18, name: "Игрок", server: "" };
     const pointer = { x: 0, y: 0, active: false };
 
     let started = false;
@@ -129,7 +121,6 @@
     let previousTime = 0;
 
     function resize() {
-      // Размер холста подстраивается под окно браузера.
       canvas.width = canvas.clientWidth;
       canvas.height = canvas.clientHeight;
       pointer.active = false;
@@ -138,8 +129,9 @@
     function startGame(event) {
       event.preventDefault();
 
-      // Берём ник из поля меню. Пустой ник заменяем на «Игрок».
       player.name = nickname.value.trim() || "Игрок";
+      player.server = serverInput.value.trim();
+
       started = true;
       menu.hidden = true;
       menuButton.hidden = false;
@@ -161,9 +153,8 @@
       const dx = pointer.x - player.x;
       const dy = pointer.y - player.y;
       const distance = Math.hypot(dx, dy);
-f (distance < 2) return;
+      if (distance < 2) return;
 
-      // atan2 вычисляет угол поворота к курсору или пальцу.
       player.angle = Math.atan2(dy, dx);
 
       const speed = boosting ? 360 : 210;
@@ -171,7 +162,6 @@ f (distance < 2) return;
       player.x += Math.cos(player.angle) * step;
       player.y += Math.sin(player.angle) * step;
 
-      // Удерживаем круг игрока внутри круглой арены.
       const limit = world.radius - player.radius;
       const fromCenter = Math.hypot(player.x, player.y);
       if (fromCenter > limit) {
@@ -197,7 +187,6 @@ f (distance < 2) return;
       const scale = arenaScale();
       ctx.scale(scale, scale);
 
-      // Арена.
       ctx.beginPath();
       ctx.arc(0, 0, world.radius, 0, Math.PI * 2);
       ctx.fillStyle = "#141428";
@@ -206,7 +195,6 @@ f (distance < 2) return;
       ctx.lineWidth = 6;
       ctx.stroke();
 
-      // Тело игрока. При ускорении оно становится светлее.
       ctx.beginPath();
       ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
       ctx.fillStyle = boosting ? "#8cf" : "#4af";
@@ -215,7 +203,6 @@ f (distance < 2) return;
       ctx.lineWidth = 2;
       ctx.stroke();
 
-      // Нос показывает направление. 26 — длина линии от центра тела.
       const noseLength = 26;
       ctx.beginPath();
       ctx.moveTo(player.x, player.y);
@@ -226,7 +213,6 @@ f (distance < 2) return;
       ctx.lineWidth = 3;
       ctx.stroke();
 
-      // Рисуем ник над игроком. Чем больше отступ, тем выше текст.
       ctx.fillStyle = "#eee";
       ctx.font = "20px system-ui";
       ctx.textAlign = "center";
@@ -256,11 +242,6 @@ f (distance < 2) return;
 
     form.addEventListener("submit", startGame);
     menuButton.addEventListener("click", openMenu);
-
-    helpButton.addEventListener("click", () => {
-      controls.hidden = !controls.hidden;
-      helpButton.setAttribute("aria-expanded", String(!controls.hidden));
-    });
 
     window.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && started && !event.repeat) {
